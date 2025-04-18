@@ -1,0 +1,36 @@
+name: Build and Push Docker Images to GHCR
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE_OWNER: ${{ github.repository_owner }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and Push Script 1
+      run: |
+        docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/line-1:latest ./line
+        docker push ghcr.io/${{ env.IMAGE_OWNER }}/line-1:latest
+
+    - name: Build and Push Script 2
+      run: |
+        docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/line-5:latest ./line-5
+        docker push ghcr.io/${{ env.IMAGE_OWNER }}/line-5:latest

@@ -8,33 +8,53 @@ from typing import Dict, Any, Tuple
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Configure logging with file output
+from dotenv import load_dotenv
+load_dotenv()
+
 log_file = 'migration.log'
+
+from logging.handlers import RotatingFileHandler
+
+file_handler = RotatingFileHandler(
+    log_file, maxBytes=5 * 1024 * 1024, backupCount=0, encoding='utf-8'
+)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, stream_handler]
 )
 
-# Telegram Configuration
-TELEGRAM_BOT_TOKEN = '1393190801:AAFSRCGOQAajiyY7SE5kxTDTcaPDecOQAjs'
-TELEGRAM_CHAT_ID = '431108047'
 
-# Database Configurations
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 mssql_config = {
-    'driver': '{SQL Server}',
-    'server': 'localhost\\SQLEXPRESS',
-    'database': 'AmaraRaja_SBD_Line1_Finishing',
-    'trusted_connection': 'yes'
+    'driver': os.getenv("MSSQL_DRIVER"),
+    'server': os.getenv("MSSQL_SERVER"),
+    'database': os.getenv("MSSQL_DB"),
+    'trusted_connection': os.getenv("MSSQL_TRUSTED", "yes"),
 }
 
+mssql_scanlogs_config = {
+    'driver': os.getenv("MSSQL_LOGS_DRIVER"),
+    'server': os.getenv("MSSQL_LOGS_SERVER"),
+    'database': os.getenv("MSSQL_LOGS_DB"),
+    'uid': os.getenv("MSSQL_LOGS_USER"),
+    'pwd': os.getenv("MSSQL_LOGS_PASS")
+}
+
+
 mysql_config = {
-    'host': '10.111.0.147',
-    'user': 'root',
-    'password': 'Arbl@123',
-    'database': 'sslabel',
-    'port': 3306,
+    'host': os.getenv("MYSQL_HOST"),
+    'user': os.getenv("MYSQL_USER"),
+    'password': os.getenv("MYSQL_PASS"),
+    'database': os.getenv("MYSQL_DB"),
+    'port': int(os.getenv("MYSQL_PORT", 3306)),
     'charset': 'utf8mb4',
     'cursorclass': pymysql.cursors.DictCursor,
     'autocommit': False,
@@ -42,6 +62,8 @@ mysql_config = {
     'read_timeout': 30,
     'write_timeout': 30,
 }
+
+LINENO = os.getenv("LINENO")
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def send_telegram_notification(message: str) -> None:
@@ -62,7 +84,7 @@ def send_telegram_notification(message: str) -> None:
 def validate_row_data(row: Dict[str, Any]) -> Tuple[bool, str]:
     if not row:
         return False, "Empty row data"
-    required_fields = ['Date_Time', 'Line', 'Finishing_Code', 'Formation_Code', 'Count', 'Shift', 'Battery_Model']
+    required_fields = ['Datetime', 'LineNo', 'Shift', 'ProductID', 'ScannedCode',"Synced"]
     for field in required_fields:
         if field not in row or row[field] is None:
             return False, f"Missing or null required field: {field}"
@@ -98,49 +120,71 @@ def migrate_data() -> None:
         logging.info("Starting data migration process")
 
         with pyodbc.connect(**mssql_config) as mssql_conn, \
-             pymysql.connect(**mysql_config) as mysql_conn:
+             pymysql.connect(**mysql_config) as mysql_conn, \
+             pyodbc.connect(**mssql_scanlogs_config) as scanlogs_conn:
             
             mssql_cursor = mssql_conn.cursor()
             mysql_cursor = mysql_conn.cursor()
+            scanlogs_cursor = scanlogs_conn.cursor()
 
-            last_entry = execute_with_retry(mysql_cursor, "SELECT MAX(entrytime) AS last_entry_time FROM barcode where lineno = 1")
+            last_entry = execute_with_retry(mysql_cursor, "SELECT MAX(entrytime) AS last_entry_time FROM barcode where lineno = 5")
             if last_entry and last_entry[0]['last_entry_time']:
                 last_entry_time = last_entry[0]['last_entry_time']
                 mssql_query = """
                 SELECT 
-                    CASE WHEN ISDATE([Date_Time]) = 1 THEN CAST([Date_Time] AS DATETIME) ELSE NULL END AS Date_Time,
-                    [Shift], [Line], [Count], [Mode], [Battery_Model], [Battery_Type],
-                    [FG_code], [Formation_Code], [Finishing_Code]
-                FROM [Battery_Printed_Logs]
-                WHERE ISDATE([Date_Time]) = 1
-                AND CAST([Date_Time] AS DATETIME) > ?
-                ORDER BY [Date_Time] ASC
+                    [ID],
+                    [LineNo],
+                    [Shift],
+                    [Mode],
+                    CAST([Datetime] AS DATETIME) AS Datetime,
+                    [ProductID],
+                    [ScannedCode],
+                    [PrintedCode],
+                    [VerifiedCode],
+                    [Synced]
+                FROM [ScanLogs]
+                WHERE CAST([Datetime] AS DATETIME) > ?
+                ORDER BY [Datetime] ASC
                 """
                 params = (last_entry_time,)
             else:
                 mssql_query = """
                 SELECT TOP 25000
-                    CASE WHEN ISDATE([Date_Time]) = 1 THEN CAST([Date_Time] AS DATETIME) ELSE NULL END AS Date_Time,
-                    [Shift], [Line], [Count], [Mode], [Battery_Model], [Battery_Type],
-                    [FG_code], [Formation_Code], [Finishing_Code]
-                FROM [Battery_Printed_Logs]
-                WHERE ISDATE([Date_Time]) = 1
-                ORDER BY [Date_Time] DESC
+                    [ID],
+                    [LineNo],
+                    [Shift],
+                    [Mode],
+                    CAST([Datetime] AS DATETIME) AS Datetime,
+                    [ProductID],
+                    [ScannedCode],
+                    [PrintedCode],
+                    [VerifiedCode],
+                    [Synced]
+                FROM [ScanLogs]
+                ORDER BY [Datetime] DESC
                 """
                 params = None
+
                 logging.info("No previous entries found. Fetching last 5000 records.")
 
             if params:
-                mssql_cursor.execute(mssql_query, params)
+                scanlogs_cursor.execute(mssql_query, params)
             else:
-                mssql_cursor.execute(mssql_query)
+                scanlogs_cursor.execute(mssql_query)
 
-            rows = [dict(zip([column[0] for column in mssql_cursor.description], row)) for row in mssql_cursor.fetchall()]
+            rows = [dict(zip([column[0] for column in scanlogs_cursor.description], row)) for row in scanlogs_cursor.fetchall()]
             if not last_entry or not last_entry[0]['last_entry_time']:
                 rows = list(reversed(rows))
 
             total_rows = len(rows)
             logging.info(f"Found {total_rows} new records to process")
+            
+            product_master = mssql_cursor.execute("SELECT * FROM ProductMaster").fetchall()
+
+            product_id_map = {
+    row.ID: (row.PlantCode.strip(), row.ProductCode.strip())
+    for row in product_master
+}
 
             batch_size = 100
             for i in range(0, total_rows, batch_size):
@@ -157,23 +201,25 @@ def migrate_data() -> None:
                         continue
 
                     try:
-                        date_time = row['Date_Time']
-                        week, year = get_week_and_year(date_time)
+                       date_time = row['Datetime']
+                       week, year = get_week_and_year(date_time)
+                       plant_code, product_code = product_id_map.get(row['ProductID'], (None, None))
 
-                        batch_values.append((
-                            row['Line'],
-                            row['Finishing_Code'],
-                            row['Formation_Code'],
-                            row['Finishing_Code'][-5:] if row['Finishing_Code'] else None,
+                       batch_values.append((
+                            row['LineNo'],
+                            row['PrintedCode'],
+                            row['ScannedCode'],
+                            row['PrintedCode'][-5:] if row['PrintedCode'] else None,
                             date_time,
                             row['Shift'],
                             week,
                             year,
-                            1,
+                            row['Synced'],
                             datetime.now(),
                             datetime.now(),
-                            f"B{row['Battery_Model']}"
-                        ))
+                            f"{plant_code}{product_code}"
+))
+
                     except Exception as e:
                         stats['records_failed'] += 1
                         logging.error(f"Error processing record {stats['records_processed']}: {str(e)}")
@@ -196,7 +242,7 @@ def migrate_data() -> None:
 
             execution_time = datetime.now() - start_time
             notification_message = f"🔄 <b>SBD1 Barcode Traceability Data Migration Report</b>\n\n" \
-                                   f"📍 Line: 1\n" \
+                                   f"📍 Line: {LINENO}\n" \
                                    f"⏰ Run Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n" \
                                    f"📊 Statistics:\n" \
                                    f"  • Records Processed: {stats['records_processed']}\n" \
@@ -214,7 +260,7 @@ def migrate_data() -> None:
         logging.error(error_message)
 
         notification_message = f"🔄 <b>SBD1 Barcode Traceability Data Migration Report</b>\n\n" \
-                               f"📍 Line: 1\n" \
+                               f"📍 Line: {LINENO}\n" \
                                f"⏰ Run Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n" \
                                f"❌ Status: Failed\n" \
                                f"📝 Error: {str(e)}\n" \

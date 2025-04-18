@@ -6,35 +6,47 @@ import requests
 import os
 from typing import Dict, Any, Tuple
 from tenacity import retry, stop_after_attempt, wait_exponential
+from dotenv import load_dotenv
+load_dotenv()
 
-# Configure logging with file output
 log_file = 'migration.log'
+
+from logging.handlers import RotatingFileHandler
+
+file_handler = RotatingFileHandler(
+    log_file, maxBytes=5 * 1024 * 1024, backupCount=0, encoding='utf-8'
+)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, stream_handler]
 )
 
 # Telegram Configuration
-TELEGRAM_BOT_TOKEN = '1393190801:AAFSRCGOQAajiyY7SE5kxTDTcaPDecOQAjs'
-TELEGRAM_CHAT_ID = '431108047'
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+LINENO = os.environ.get('LINENO')
 
 # Database Configurations
 mssql_config = {
-    'driver': '{SQL Server}',
-    'server': 'localhost\\SQLEXPRESS',
-    'database': 'AmaraRaja_SBD_Finishing',
+    'driver': '{ODBC Driver 17 for SQL Server}',
+    'server': os.environ.get('MSSQL_SERVER'),
+    'database': os.environ.get('MSSQL_DB'),
     'trusted_connection': 'yes'
 }
 
 mysql_config = {
-    'host': '10.111.0.147',
-    'user': 'root',
-    'password': 'Arbl@123',
-    'database': 'sslabel',
-    'port': 3306,
+    'host': os.environ.get('MYSQL_HOST'),
+    'user': os.environ.get('MYSQL_USER'),
+    'password': os.environ.get('MYSQL_PASSWORD'),
+    'database': os.environ.get('MYSQL_DB'),
+    'port': int(os.environ.get('MYSQL_PORT', 3306)),
     'charset': 'utf8mb4',
     'cursorclass': pymysql.cursors.DictCursor,
     'autocommit': False,
@@ -47,11 +59,7 @@ mysql_config = {
 def send_telegram_notification(message: str) -> None:
     try:
         url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-        payload = {
-            'chat_id': TELEGRAM_CHAT_ID,
-            'text': message,
-            'parse_mode': 'HTML'
-        }
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         logging.info('Telegram notification sent successfully')
@@ -60,17 +68,14 @@ def send_telegram_notification(message: str) -> None:
         raise
 
 def validate_row_data(row: Dict[str, Any]) -> Tuple[bool, str]:
-    if not row:
-        return False, "Empty row data"
-    required_fields = ['Datetime', 'LineNo', 'Shift', 'ProductID', 'ScannedCode',"Synced"]
+    required_fields = ['Date_Time', 'Line', 'Finishing_Code', 'Formation_Code', 'Count', 'Shift', 'Battery_Model']
     for field in required_fields:
         if field not in row or row[field] is None:
             return False, f"Missing or null required field: {field}"
     return True, ""
 
 def get_week_and_year(date_time: datetime) -> Tuple[int, int]:
-    iso_calendar = date_time.isocalendar()
-    return iso_calendar[1], iso_calendar[0]
+    return date_time.isocalendar()[1], date_time.isocalendar()[0]
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def execute_with_retry(cursor, query: str, params: tuple = None) -> Any:
@@ -86,119 +91,69 @@ def execute_with_retry(cursor, query: str, params: tuple = None) -> Any:
 
 def migrate_data() -> None:
     start_time = datetime.now()
-    last_entry_time = None  # Initialize to avoid reference before assignment
-    stats = {
-        'records_processed': 0,
-        'records_inserted': 0,
-        'records_failed': 0,
-        'validation_failures': 0
-    }
+    stats = {'records_processed': 0, 'records_inserted': 0, 'records_failed': 0, 'validation_failures': 0}
 
     try:
         logging.info("Starting data migration process")
 
         with pyodbc.connect(**mssql_config) as mssql_conn, \
              pymysql.connect(**mysql_config) as mysql_conn:
-            
+
             mssql_cursor = mssql_conn.cursor()
             mysql_cursor = mysql_conn.cursor()
 
-            last_entry = execute_with_retry(mysql_cursor, "SELECT MAX(entrytime) AS last_entry_time FROM barcode where lineno = 5")
-            if last_entry and last_entry[0]['last_entry_time']:
-                last_entry_time = last_entry[0]['last_entry_time']
+            last_entry = execute_with_retry(mysql_cursor, "SELECT MAX(entrytime) AS last_entry_time FROM barcode where lineno = 1")
+            last_entry_time = last_entry[0]['last_entry_time'] if last_entry and last_entry[0]['last_entry_time'] else None
+
+            if last_entry_time:
                 mssql_query = """
                 SELECT 
-                    [ID],
-                    [LineNo],
-                    [Shift],
-                    [Mode],
-                    CAST([Datetime] AS DATETIME) AS Datetime,
-                    [ProductID],
-                    [ScannedCode],
-                    [PrintedCode],
-                    [VerifiedCode],
-                    [Synced]
-                FROM [ScanLogs]
-                WHERE CAST([Datetime] AS DATETIME) > ?
-                ORDER BY [Datetime] ASC
+                    CASE WHEN ISDATE([Date_Time]) = 1 THEN CAST([Date_Time] AS DATETIME) ELSE NULL END AS Date_Time,
+                    [Shift], [Line], [Count], [Mode], [Battery_Model], [Battery_Type],
+                    [FG_code], [Formation_Code], [Finishing_Code]
+                FROM [Battery_Printed_Logs]
+                WHERE ISDATE([Date_Time]) = 1 AND CAST([Date_Time] AS DATETIME) > ?
+                ORDER BY [Date_Time] ASC
                 """
-                params = (last_entry_time,)
+                mssql_cursor.execute(mssql_query, (last_entry_time,))
             else:
                 mssql_query = """
                 SELECT TOP 25000
-                    [ID],
-                    [LineNo],
-                    [Shift],
-                    [Mode],
-                    CAST([Datetime] AS DATETIME) AS Datetime,
-                    [ProductID],
-                    [ScannedCode],
-                    [PrintedCode],
-                    [VerifiedCode],
-                    [Synced]
-                FROM [ScanLogs]
-                ORDER BY [Datetime] DESC
+                    CASE WHEN ISDATE([Date_Time]) = 1 THEN CAST([Date_Time] AS DATETIME) ELSE NULL END AS Date_Time,
+                    [Shift], [Line], [Count], [Mode], [Battery_Model], [Battery_Type],
+                    [FG_code], [Formation_Code], [Finishing_Code]
+                FROM [Battery_Printed_Logs]
+                WHERE ISDATE([Date_Time]) = 1
+                ORDER BY [Date_Time] DESC
                 """
-                params = None
-
-                logging.info("No previous entries found. Fetching last 5000 records.")
-
-            if params:
-                mssql_cursor.execute(mssql_query, params)
-            else:
                 mssql_cursor.execute(mssql_query)
 
             rows = [dict(zip([column[0] for column in mssql_cursor.description], row)) for row in mssql_cursor.fetchall()]
-            if not last_entry or not last_entry[0]['last_entry_time']:
+            if not last_entry_time:
                 rows = list(reversed(rows))
 
-            total_rows = len(rows)
-            logging.info(f"Found {total_rows} new records to process")
-            
-            product_master = mssql_cursor.execute("SELECT * FROM ProductMaster").fetchall()
+            logging.info(f"Found {len(rows)} new records to process")
 
-            product_id_map = {
-    row.ID: (row.PlantCode.strip(), row.ProductCode.strip())
-    for row in product_master
-}
-
-            batch_size = 100
-            for i in range(0, total_rows, batch_size):
-                batch = rows[i:i + batch_size]
+            for i in range(0, len(rows), 100):
+                batch = rows[i:i + 100]
                 batch_values = []
 
                 for row in batch:
                     stats['records_processed'] += 1
-
-                    is_valid, error_message = validate_row_data(row)
-                    if not is_valid:
+                    valid, error = validate_row_data(row)
+                    if not valid:
                         stats['validation_failures'] += 1
-                        logging.warning(f"Validation failed for record {stats['records_processed']}: {error_message}")
                         continue
 
                     try:
-                       date_time = row['Datetime']
-                       week, year = get_week_and_year(date_time)
-                       plant_code, product_code = product_id_map.get(row['ProductID'], (None, None))
-
-                       batch_values.append((
-                            row['LineNo'],
-                            row['PrintedCode'],
-                            row['ScannedCode'],
-                            row['PrintedCode'][-5:] if row['PrintedCode'] else None,
-                            date_time,
-                            row['Shift'],
-                            week,
-                            year,
-                            row['Synced'],
-                            datetime.now(),
-                            datetime.now(),
-                            f"{plant_code}{product_code}"
-))
-
-                    except Exception as e:
+                        week, year = get_week_and_year(row['Date_Time'])
+                        batch_values.append((
+                            row['Line'], row['Finishing_Code'], row['Formation_Code'],
+                            row['Finishing_Code'][-5:], row['Date_Time'], row['Shift'], week,
+                            year, 1, datetime.now(), datetime.now(), f"B{row['Battery_Model']}"
+                        ))
+                    except Exception:
                         stats['records_failed'] += 1
-                        logging.error(f"Error processing record {stats['records_processed']}: {str(e)}")
 
                 if batch_values:
                     try:
@@ -210,15 +165,13 @@ def migrate_data() -> None:
                         """, batch_values)
                         mysql_conn.commit()
                         stats['records_inserted'] += len(batch_values)
-                        logging.info(f"Inserted batch of {len(batch_values)} records. Progress: {stats['records_processed']}/{total_rows}")
-                    except Exception as e:
+                    except Exception:
                         mysql_conn.rollback()
                         stats['records_failed'] += len(batch_values)
-                        logging.error(f"Batch insertion failed: {str(e)}")
 
             execution_time = datetime.now() - start_time
             notification_message = f"🔄 <b>SBD1 Barcode Traceability Data Migration Report</b>\n\n" \
-                                   f"📍 Line: 5\n" \
+                                   f"📍 Line: {LINENO}\n" \
                                    f"⏰ Run Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n" \
                                    f"📊 Statistics:\n" \
                                    f"  • Records Processed: {stats['records_processed']}\n" \
@@ -228,15 +181,13 @@ def migrate_data() -> None:
                                    f"⌛ Last Entry Time: {last_entry_time if last_entry_time else 'Initial Load'}\n" \
                                    f"⏱ Execution Duration: {execution_time}\n" \
                                    f"✅ Status: Success"
-
-            send_telegram_notification(notification_message)
+            send_telegram_notification(
+                notification_message   )
 
     except Exception as e:
-        error_message = f"Migration failed: {str(e)}"
-        logging.error(error_message)
-
+        logging.error(f"Migration failed: {e}")
         notification_message = f"🔄 <b>SBD1 Barcode Traceability Data Migration Report</b>\n\n" \
-                               f"📍 Line: 5\n" \
+                               f"📍 Line: {LINENO}\n" \
                                f"⏰ Run Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n" \
                                f"❌ Status: Failed\n" \
                                f"📝 Error: {str(e)}\n" \
@@ -247,7 +198,6 @@ def migrate_data() -> None:
                                f"  • Validation Failures: {stats['validation_failures']}"
 
         send_telegram_notification(notification_message)
-        raise
 
 if __name__ == "__main__":
     migrate_data()
