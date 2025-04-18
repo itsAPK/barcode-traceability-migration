@@ -27,10 +27,10 @@ jobs:
 
     - name: Build and Push Script 1
       run: |
-        docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/line-1:latest ./line
-        docker push ghcr.io/${{ env.IMAGE_OWNER }}/line-1:latest
+        docker build -t ghcr.io/itsapk/barcode-traceability-line-1:latest ./line
+        docker push ghcr.io/itsapk/barcode-traceability-line-1:latest
 
     - name: Build and Push Script 2
       run: |
-        docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/line-5:latest ./line-5
-        docker push ghcr.io/${{ env.IMAGE_OWNER }}/line-5:latest
+        docker build -t ghcr.io/itsapk/barcode-traceability-line-5:latest ./line-5
+        docker push ghcr.io/itsapk/barcode-traceability-line-5:latest
