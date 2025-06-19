@@ -16,9 +16,8 @@ logging.basicConfig(
 )
 
 # Telegram config
-TELEGRAM_BOT_TOKEN = 'your_token_here'
-TELEGRAM_CHAT_ID = 'your_chat_id_here'
-
+TELEGRAM_BOT_TOKEN = '1393190801:AAFSRCGOQAajiyY7SE5kxTDTcaPDecOQAjs'
+TELEGRAM_CHAT_ID = '431108047'
 # MSSQL
 mssql_config = {
     'driver': '{SQL Server}',
